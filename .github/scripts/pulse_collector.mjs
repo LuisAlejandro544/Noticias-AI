@@ -2,13 +2,15 @@
  * Script Autónomo del Ciclo de Despacho 6 Horas — Chronos AI Pulse
  *
  * Responsabilidad de este script:
- * 1. Calcular la ventana temporal de las últimas 6 horas (UTC) desde el momento de ejecución.
- * 2. Realizar un rastreo abierto y multi-fuente en la web (Reddit r/LocalLLaMA, r/MachineLearning,
- *    r/Singularity, Hugging Face Daily Papers, arXiv CS y señales de filtraciones).
- * 3. Descargar y almacenar localmente imágenes, diagramas y capturas asociadas a las novedades.
- * 4. Iniciar Gemini 3.8 Flash con Razonamiento Alto (ThinkingLevel.HIGH) y capacidades de búsqueda abierta.
- * 5. Realizar una auditoría técnica profunda (verificación de filtraciones, pesos, arquitectura y comunidad).
- * 6. Generar el informe en Markdown y HTML responsivo optimizado para móviles, y guardar los artefactos.
+ * 1. Calcular la ventana temporal de las últimas 6 horas (UTC).
+ * 2. Rastrear la web abierta mediante DuckDuckGo HTML (html.duckduckgo.com) sin atarse a
+ *    ninguna comunidad o dominio cerrado: captura filtraciones (leaks), anuncios en X/Twitter,
+ *    posts de cualquier foro/Reddit, repositorios en GitHub, papers y páginas web globales.
+ * 3. Complementar con Hugging Face Daily Papers para papers de alta relevancia de la jornada.
+ * 4. Extraer imágenes relevantes (thumbnails, OpenGraph cards y capturas) y guardarlas en output/images/.
+ * 5. Iniciar Gemini 3.8 Flash con Razonamiento Alto (ThinkingLevel.HIGH) para auditar con rigor técnico
+ *    la verosimilitud de las filtraciones, requerimientos de VRAM y novedades de la ventana.
+ * 6. Compilar los artefactos de salida (Markdown, HTML responsive móvil y JSON) para GitHub Actions.
  */
 
 import fs from 'node:fs';
@@ -16,7 +18,7 @@ import path from 'node:path';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 // ============================================================================
-// 1. CONFIGURACIÓN Y PARÁMETROS DE LA VENTANA TEMPORAL (6 HORAS)
+// 1. PARÁMETROS TEMPORALES Y CONFIGURACIÓN DEL ENTORNO
 // ============================================================================
 
 const AHORA_MS = Date.now();
@@ -29,82 +31,156 @@ const FECHA_INICIO_ISO = new Date(HACE_6_HORAS_MS).toISOString();
 const TEMA_PERSONALIZADO = (process.env.INPUT_CUSTOM_TOPIC || '').trim();
 const NIVEL_PROFUNDIDAD = (process.env.INPUT_DEPTH_LEVEL || 'exhaustive_thinking').trim();
 
-// Directorios de salida para los artefactos de GitHub Actions
+// Rutas de carpetas para GitHub Action Artifacts
 const DIRECTORIO_OUTPUT = path.resolve('output');
 const DIRECTORIO_IMAGENES = path.join(DIRECTORIO_OUTPUT, 'images');
 
-// Asegurar que las carpetas de salida existen
 fs.mkdirSync(DIRECTORIO_IMAGENES, { recursive: true });
 
 console.log('='.repeat(70));
-console.log('⚡ CHRONOS AI PULSE — CICLO AUTÓNOMO DE 6 HORAS');
-console.log(`⏰ Ventana de Ingesta: ${FECHA_INICIO_ISO} ──► ${FECHA_AHORA_ISO}`);
+console.log('⚡ CHRONOS AI PULSE — RASTREO ABIERTO DUCKDUCKGO & GEMINI 3.8 FLASH');
+console.log(`⏰ Ventana Temporal (6 Horas): ${FECHA_INICIO_ISO} ──► ${FECHA_AHORA_ISO}`);
 if (TEMA_PERSONALIZADO) {
-  console.log(`🎯 Foco Prioritario Manual: "${TEMA_PERSONALIZADO}"`);
+  console.log(`🎯 Foco Prioritario Solicitado: "${TEMA_PERSONALIZADO}"`);
 }
-console.log(`🧠 Nivel de Razonamiento Gemini: ${NIVEL_PROFUNDIDAD}`);
+console.log(`🧠 Nivel de Razonamiento: ${NIVEL_PROFUNDIDAD} (ThinkingLevel.HIGH)`);
 console.log('='.repeat(70));
 
-// ============================================================================
-// 2. FUNCIONES DE RASTREO MULTI-FUENTE (REDDIT, HUGGING FACE, ARXIV)
-// ============================================================================
-
-/**
- * Encabezados HTTP estándar simulando cliente de investigación para evitar bloqueos
- */
-const HEADERS_HTTP = {
-  'User-Agent': 'ChronosAIPulse/1.0 (Autonomous AI Research Bot; Open Science Aggregator)',
-  'Accept': 'application/json, text/xml, application/xml, text/html'
+// Encabezados HTTP para evitar bloqueos por WAF o centros de datos
+const HEADERS_NAVEGADOR = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+  'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
 };
 
+// ============================================================================
+// 2. UTILIDADES DE LIMPIEZA Y DECODIFICACIÓN HTML
+// ============================================================================
+
 /**
- * Consulta un subreddit público en formato JSON y filtra novedades de la ventana de 6 horas
+ * Limpia etiquetas HTML y resuelve entidades comunes como &quot;, &#x27;, &amp;
  */
-async function rastrearRedditSubreddit(subreddit, limite = 20) {
-  const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${limite}`;
+function limpiarTextoHtml(htmlStr) {
+  if (!htmlStr) return '';
+  return htmlStr
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&quot;/g, '"')
+    .replace(/&#x27;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * Decodifica la URL de redirección interna de DuckDuckGo (parámetro uddg)
+ */
+function extraerUrlRealDuckDuckGo(hrefRaw) {
+  if (!hrefRaw) return '';
   try {
-    const res = await fetch(url, { headers: HEADERS_HTTP });
+    if (hrefRaw.includes('uddg=')) {
+      const match = hrefRaw.match(/uddg=([^&]+)/);
+      if (match && match[1]) {
+        return decodeURIComponent(match[1]);
+      }
+    }
+    if (hrefRaw.startsWith('//')) {
+      return `https:${hrefRaw}`;
+    }
+    return hrefRaw;
+  } catch {
+    return hrefRaw;
+  }
+}
+
+// ============================================================================
+// 3. RASTREADOR ABIERTO DUCKDUCKGO HTML (SIN JAULAS NI ATADURAS)
+// ============================================================================
+
+/**
+ * Realiza una búsqueda abierta en DuckDuckGo HTML (sin JavaScript ni CAPTCHAs)
+ * Parámetro df=d: Filtra resultados de las últimas 24 horas/recientes
+ */
+async function buscarDuckDuckGoHtml(consulta, filtroTiempo = 'd') {
+  const urlEndpoint = 'https://html.duckduckgo.com/html/';
+  console.log(`  🌐 Consultando DuckDuckGo: "${consulta}" (filtro tiempo: ${filtroTiempo})...`);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+
+    const bodyParams = new URLSearchParams();
+    bodyParams.append('q', consulta);
+    if (filtroTiempo) {
+      bodyParams.append('df', filtroTiempo);
+    }
+    bodyParams.append('b', '');
+
+    const res = await fetch(urlEndpoint, {
+      method: 'POST',
+      headers: {
+        ...HEADERS_NAVEGADOR,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: bodyParams.toString(),
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
     if (!res.ok) {
-      console.warn(`[Reddit] No se pudo obtener r/${subreddit} (HTTP ${res.status})`);
+      console.warn(`  ⚠️ DuckDuckGo devolvió estado HTTP ${res.status}`);
       return [];
     }
-    const data = await res.json();
-    const children = data?.data?.children || [];
-    
-    const items = [];
-    for (const entry of children) {
-      const post = entry.data;
-      if (!post) continue;
-      
-      const postCreatedAtMs = post.created_utc * 1000;
-      // Filtramos posts recientes (últimas 8 horas para dar margen de husos horarios y procesamiento)
-      const esReciente = postCreatedAtMs >= (HACE_6_HORAS_MS - 2 * 60 * 60 * 1000);
-      
-      // Detectar URL de imagen directa o preview si existe
-      let imagenUrl = null;
-      if (post.url && (post.url.endsWith('.png') || post.url.endsWith('.jpg') || post.url.endsWith('.jpeg') || post.url.endsWith('.webp'))) {
-        imagenUrl = post.url;
-      } else if (post.preview?.images?.[0]?.source?.url) {
-        imagenUrl = post.preview.images[0].source.url.replace(/&amp;/g, '&');
+
+    const html = await res.text();
+    const resultados = [];
+
+    // Expresión regular para capturar cada resultado en la página estática de DuckDuckGo
+    // Estructura: <a class="result__snippet" ...> o bloque <h2 class="result__title">
+    const bloqueRegex = /<div class="result results_links results_links_deep[^"]*"[\s\S]*?<\/div>\s*<\/div>/g;
+    const bloques = html.match(bloqueRegex) || [];
+
+    for (const bloque of bloques.slice(0, 8)) {
+      // 1. Extraer enlace y título
+      const linkMatch = bloque.match(/<a class="result__url"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i) ||
+                        bloque.match(/<a class="result__snippet"[^>]*href="([^"]+)"/i) ||
+                        bloque.match(/<h2 class="result__title">[\s\S]*?<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
+
+      if (!linkMatch) continue;
+
+      const urlOriginal = extraerUrlRealDuckDuckGo(linkMatch[1]);
+      let titulo = limpiarTextoHtml(linkMatch[2] || '');
+
+      // Si el título quedó vacío, buscar en el bloque del título h2
+      if (!titulo) {
+        const titleFallback = bloque.match(/<h2 class="result__title">([\s\S]*?)<\/h2>/i);
+        if (titleFallback) titulo = limpiarTextoHtml(titleFallback[1]);
       }
 
-      if (esReciente || post.score > 150) {
-        items.push({
-          fuente: `Reddit r/${subreddit}`,
-          titulo: post.title,
-          autor: post.author,
-          puntuacion: post.score,
-          comentarios: post.num_comments,
-          enlace: `https://www.reddit.com${post.permalink}`,
-          texto: (post.selftext || '').slice(0, 1500),
-          imagenUrl,
-          creado_utc: new Date(postCreatedAtMs).toISOString()
+      // 2. Extraer fragmento (snippet) de contenido
+      const snippetMatch = bloque.match(/<a class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i);
+      const snippet = snippetMatch ? limpiarTextoHtml(snippetMatch[1]) : '';
+
+      if (urlOriginal && (titulo || snippet)) {
+        resultados.push({
+          fuente: 'DuckDuckGo Web Abierta',
+          titulo: titulo || 'Noticia de IA detectada',
+          enlace: urlOriginal,
+          texto: snippet,
+          consultaOrigen: consulta
         });
       }
     }
-    return items;
+
+    console.log(`    ↳ ${resultados.length} resultados extraídos para "${consulta}".`);
+    return resultados;
   } catch (error) {
-    console.warn(`[Reddit] Error al consultar r/${subreddit}:`, error.message);
+    console.warn(`  ⚠️ Error en DuckDuckGo para "${consulta}":`, error.message);
     return [];
   }
 }
@@ -115,51 +191,85 @@ async function rastrearRedditSubreddit(subreddit, limite = 20) {
 async function rastrearHuggingFaceDailyPapers() {
   const url = 'https://huggingface.co/api/daily_papers';
   try {
-    const res = await fetch(url, { headers: HEADERS_HTTP });
-    if (!res.ok) {
-      console.warn(`[Hugging Face] Error HTTP ${res.status}`);
-      return [];
-    }
+    const res = await fetch(url, { headers: { 'User-Agent': HEADERS_NAVEGADOR['User-Agent'] } });
+    if (!res.ok) return [];
     const papers = await res.json();
     if (!Array.isArray(papers)) return [];
 
-    return papers.slice(0, 10).map((item) => {
+    return papers.slice(0, 8).map((item) => {
       const paper = item.paper || item;
       return {
         fuente: 'Hugging Face Daily Papers',
-        titulo: paper.title || 'Sin título',
-        resumen: (paper.summary || '').slice(0, 1000),
+        titulo: paper.title || 'Paper relevante',
+        texto: (paper.summary || '').slice(0, 1000),
         votos: item.numComments || paper.upvotes || 0,
         enlace: `https://huggingface.co/papers/${paper.id}`,
-        imagenUrl: paper.media?.thumbnail || null,
-        publicado: paper.publishedAt || FECHA_AHORA_ISO
+        imagenUrl: paper.media?.thumbnail || null
       };
     });
   } catch (error) {
-    console.warn('[Hugging Face] Error al consultar Daily Papers:', error.message);
+    console.warn('  ⚠️ No se pudo consultar Hugging Face Papers:', error.message);
     return [];
   }
 }
 
+// ============================================================================
+// 4. DESCARGA DE IMÁGENES Y METADATOS VISUALES (OPENGRAPH & PAPERS)
+// ============================================================================
+
 /**
- * Descarga y guarda una imagen localmente en la carpeta de artefactos
+ * Intenta extraer la imagen OpenGraph (og:image) o Twitter card de una URL web
  */
-async function descargarImagen(url, nombreBase) {
+async function extraerOgImageDeUrl(url) {
+  if (!url || !url.startsWith('http')) return null;
+  // Omitir dominios que bloquean scrapers con captchas conocidos
+  if (url.includes('twitter.com') || url.includes('x.com')) return null;
+
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
-    
+    const timeout = setTimeout(() => controller.abort(), 4000);
     const res = await fetch(url, { 
-      headers: { 'User-Agent': HEADERS_HTTP['User-Agent'] },
+      headers: HEADERS_NAVEGADOR,
       signal: controller.signal 
     });
     clearTimeout(timeout);
 
     if (!res.ok) return null;
+    const html = await res.text();
 
+    const ogMatch = html.match(/<meta\s+property=["']og:image["']\s+content=["']([^"']+)["']/i) ||
+                    html.match(/<meta\s+content=["']([^"']+)["']\s+property=["']og:image["']/i) ||
+                    html.match(/<meta\s+name=["']twitter:image["']\s+content=["']([^"']+)["']/i);
+
+    if (ogMatch && ogMatch[1]) {
+      let imgUrl = ogMatch[1];
+      if (imgUrl.startsWith('//')) imgUrl = `https:${imgUrl}`;
+      else if (imgUrl.startsWith('/')) {
+        const parsed = new URL(url);
+        imgUrl = `${parsed.origin}${imgUrl}`;
+      }
+      return imgUrl;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Descarga una imagen remota y la almacena localmente en output/images/
+ */
+async function descargarImagen(url, nombreBase) {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    const res = await fetch(url, { headers: HEADERS_NAVEGADOR, signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!res.ok) return null;
     const buffer = await res.arrayBuffer();
-    // Limitar tamaño a 8 MB
-    if (buffer.byteLength > 8 * 1024 * 1024 || buffer.byteLength < 500) return null;
+
+    if (buffer.byteLength < 800 || buffer.byteLength > 8 * 1024 * 1024) return null;
 
     const ext = url.includes('.png') ? 'png' : url.includes('.webp') ? 'webp' : 'jpg';
     const nombreLimpio = `${nombreBase.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 40)}.${ext}`;
@@ -173,179 +283,186 @@ async function descargarImagen(url, nombreBase) {
       fuenteOriginal: url
     };
   } catch (error) {
-    console.warn(`  ⚠️ No se pudo descargar imagen ${url}: ${error.message}`);
     return null;
   }
 }
 
 // ============================================================================
-// 3. EJECUCIÓN DEL RASTREO Y DESCARGA DE ACTIVOS VISUALES
+// 5. BATERÍA DE RASTREO MULTI-ANGULAR DE LA WEB ABIERTA
 // ============================================================================
 
-async function recolectarDatosEImagenes() {
-  console.log('\n📡 [Paso 1/4] Rastreando fuentes abiertas sin restricciones de dominio...');
+async function ejecutarRastreoWebAbierto() {
+  console.log('\n📡 [Paso 1/4] Ejecutando batería de consultas abiertas en DuckDuckGo HTML...');
 
-  const subreddits = ['LocalLLaMA', 'MachineLearning', 'singularity', 'ArtificialInteligence'];
-  const promesasReddit = subreddits.map(sub => rastrearRedditSubreddit(sub));
-  const promesaHF = rastrearHuggingFaceDailyPapers();
+  // Construir consultas abiertas (sin atarse a una sola comunidad)
+  const consultas = [];
 
-  const [resReddit, itemsHF] = await Promise.all([
-    Promise.all(promesasReddit),
-    promesaHF
+  if (TEMA_PERSONALIZADO) {
+    consultas.push(TEMA_PERSONALIZADO);
+    consultas.push(`"${TEMA_PERSONALIZADO}" leak OR release OR weights OR benchmark`);
+  }
+
+  consultas.push('AI model leak OR "open weights" OR release 2026');
+  consultas.push('site:x.com "new AI model" OR "released" OR "weights"');
+  consultas.push('site:reddit.com AI model leak OR release OR weights OR benchmark');
+  consultas.push('new AI research paper "weights" OR "architecture" benchmark');
+
+  const promesasBusqueda = consultas.map(q => buscarDuckDuckGoHtml(q, 'd'));
+  const promesaHuggingFace = rastrearHuggingFaceDailyPapers();
+
+  const [resDuck, itemsHF] = await Promise.all([
+    Promise.all(promesasBusqueda),
+    promesaHuggingFace
   ]);
 
-  const itemsReddit = resReddit.flat();
-  console.log(`✅ Novedades encontradas: ${itemsReddit.length} posts en Reddit, ${itemsHF.length} papers en Hugging Face.`);
+  // Unificar y deduplicar resultados por URL
+  const mapaUrls = new Map();
+  for (const lista of resDuck) {
+    for (const item of lista) {
+      if (item.enlace && !mapaUrls.has(item.enlace)) {
+        mapaUrls.set(item.enlace, item);
+      }
+    }
+  }
 
-  // Descarga de imágenes relevantes asociadas a las novedades
-  console.log('\n🖼️ [Paso 2/4] Identificando y descargando imágenes, diagramas y capturas...');
+  const itemsWeb = Array.from(mapaUrls.values());
+  console.log(`✅ Resultados únicos recolectados de la web abierta: ${itemsWeb.length}`);
+  console.log(`✅ Papers de Hugging Face recolectados: ${itemsHF.length}`);
+
+  // Extracción y descarga de imágenes
+  console.log('\n🖼️ [Paso 2/4] Buscando y descargando imágenes asociadas a las novedades...');
   const imagenesDescargadas = [];
   let contadorImg = 1;
 
-  for (const item of [...itemsReddit, ...itemsHF]) {
-    if (item.imagenUrl && contadorImg <= 8) {
-      const resultadoImg = await descargarImagen(item.imagenUrl, `figura_${contadorImg}_${item.fuente}`);
-      if (resultadoImg) {
-        imagenesDescargadas.push({
-          ...resultadoImg,
-          noticiaTitulo: item.titulo,
-          fuente: item.fuente
-        });
+  // 1. Imágenes directas de Hugging Face
+  for (const hf of itemsHF) {
+    if (hf.imagenUrl && contadorImg <= 6) {
+      const guardada = await descargarImagen(hf.imagenUrl, `figura_${contadorImg}_paper`);
+      if (guardada) {
+        imagenesDescargadas.push({ ...guardada, titulo: hf.titulo, fuente: hf.fuente });
         contadorImg++;
       }
     }
   }
 
-  console.log(`✅ Total de imágenes almacenadas en el artefacto: ${imagenesDescargadas.length}`);
+  // 2. OpenGraph images de las páginas web encontradas
+  for (const webItem of itemsWeb.slice(0, 10)) {
+    if (contadorImg > 8) break;
+    const ogImgUrl = await extraerOgImageDeUrl(webItem.enlace);
+    if (ogImgUrl) {
+      const guardada = await descargarImagen(ogImgUrl, `figura_${contadorImg}_web`);
+      if (guardada) {
+        imagenesDescargadas.push({ ...guardada, titulo: webItem.titulo, fuente: webItem.enlace });
+        contadorImg++;
+      }
+    }
+  }
+
+  console.log(`✅ Total de figuras y diagramas almacenados: ${imagenesDescargadas.length}`);
 
   return {
-    itemsReddit,
+    itemsWeb,
     itemsHF,
     imagenesDescargadas
   };
 }
 
 // ============================================================================
-// 4. INFERENCIA Y SÍNTESIS PROFUNDA CON GEMINI 3.8 FLASH (RAZONAMIENTO ALTO)
+// 6. INFERENCIA CON GEMINI 3.8 FLASH (RAZONAMIENTO ALTO)
 // ============================================================================
 
-async function ejecutarInvestigacionGemini(datosRecopilados) {
-  console.log('\n🧠 [Paso 3/4] Enviando material a Gemini 3.8 Flash con Razonamiento Alto...');
+async function razonarYGenerarInforme(datos) {
+  console.log('\n🧠 [Paso 3/4] Enviando señales a Gemini 3.8 Flash con Razonamiento Alto...');
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    throw new Error('No se encontró la variable de entorno GEMINI_API_KEY. Configúrala en los Secrets del repositorio de GitHub.');
+    throw new Error('Falta la variable de entorno GEMINI_API_KEY. Configúrala en los Secrets del repositorio.');
   }
 
   const ai = new GoogleGenAI({ apiKey });
 
-  // Preparar el dossier contextual con las noticias capturadas
-  const dossierTexto = `
-=== DATOS RECOLECTADOS DE LA VENTANA DE LAS ÚLTIMAS 6 HORAS ===
-Hora de ejecución UTC: ${FECHA_AHORA_ISO}
-Ventana analizada: ${FECHA_INICIO_ISO} hasta ${FECHA_AHORA_ISO}
-${TEMA_PERSONALIZADO ? `FOCO PRIORITARIO SOLICITADO: "${TEMA_PERSONALIZADO}"` : ''}
+  const dossier = `
+=== SEÑALES Y NOTICIAS RECOLECTADAS DE LA WEB ABIERTA (ÚLTIMAS 6 HORAS) ===
+Hora UTC: ${FECHA_AHORA_ISO}
+Ventana: ${FECHA_INICIO_ISO} ──► ${FECHA_AHORA_ISO}
+${TEMA_PERSONALIZADO ? `FOCO PRIORITARIO: "${TEMA_PERSONALIZADO}"` : ''}
 
---- PAPERS EN HUGGING FACE (DAILY PAPERS) ---
-${JSON.stringify(datosRecopilados.itemsHF, null, 2)}
+--- NOVEDADES Y FILTRACIONES RASTREADAS EN LA WEB (DUCKDUCKGO: X, REDDIT, BLOGS, REPOSITORIOS) ---
+${JSON.stringify(datos.itemsWeb, null, 2)}
 
---- DEBATES, PRUEBAS Y FILTRACIONES EN REDDIT (LocalLLaMA, MachineLearning, etc.) ---
-${JSON.stringify(datosRecopilados.itemsReddit.slice(0, 15), null, 2)}
+--- PAPERS DESTACADOS EN HUGGING FACE DAILY PAPERS ---
+${JSON.stringify(datos.itemsHF, null, 2)}
 
---- IMÁGENES Y DIAGRAMAS CAPTURADOS LOCALMENTE ---
-${JSON.stringify(datosRecopilados.imagenesDescargadas, null, 2)}
+--- EVIDENCIA VISUAL CAPTURADA LOCALMENTE ---
+${JSON.stringify(datos.imagenesDescargadas, null, 2)}
 `;
 
   const systemInstruction = `
 Eres el Investigador Técnico y Auditor de IA de Chronos AI Pulse.
-Tu misión es procesar toda la información de las últimas 6 horas y redactar un informe exhaustivo, riguroso y sin marketing.
+Tu misión es analizar todas las señales recolectadas en la web abierta durante las últimas 6 horas y redactar un informe exhaustivo, riguroso y sin marketing.
 
-REGLAS METODOLÓGICAS OBLIGATORIAS:
-1. RASTREO ABIERTO: Si el tema involucra filtraciones, repositorios nuevos, lanzamientos sorpresa o pruebas de hardware en las últimas 6 horas, audita la verosimilitud técnica.
+REGLAS DE AUDITORÍA Y RAZONAMIENTO:
+1. RASTREO ABIERTO: Analiza posts de X, foros, Reddit, páginas de noticias y repositorios.
 2. AUDITORÍA DE FILTRACIONES (LEAKS):
-   - Separa claramente: [CONFIRMADO CON PESOS/CÓDIGO], [FILTRACIÓN EN INVESTIGACIÓN], o [HUMO / RUMOR DESCARTADO].
-   - Evalúa si los requerimientos de VRAM, parámetros y arquitectura tienen sentido matemático.
+   - Separa con rigor: [CONFIRMADO CON PESOS/CÓDIGO], [FILTRACIÓN EN INVESTIGACIÓN], o [HUMO / RUMOR DESCARTADO].
+   - Razona sobre requerimientos de VRAM, parámetros (ej. FP8, MoE, arquitectura latente) y factibilidad matemática.
 3. FILTRO DE LOS 4 PILARES:
    - Impacto Técnico Real (pesos abiertos, benchmarks reproducibles).
-   - Arquitectura y Hardware (chips, memoria, inferencia, vLLM, GGUF).
-   - Regulaciones y Seguridad vinculante.
+   - Arquitectura & Hardware (VRAM, cuantizaciones GGUF/vLLM, chips).
+   - Regulaciones vinculantes y Seguridad.
    - Ecosistema Open Source.
 4. ESTRUCTURA DEL INFORME:
-   - Titular ejecutivo impactante pero sobrio.
-   - Flash de 30 Segundos (bullet points concisos).
-   - Ficha Técnica de las Novedades Críticas (laboratorio, pesos, licencia, enlaces).
-   - Desglose Arquitectónico Profundo.
-   - Veredicto de la Comunidad (r/LocalLLaMA y desarrolladores).
-   - Galería de Imágenes y Diagramas (referenciando las imágenes capturadas como images/nombre_archivo.jpg).
-   - Fuentes consultadas y enlaces directos.
+   - Titular ejecutivo y fecha UTC.
+   - Flash de 30 Segundos (3-5 viñetas concisas para móvil).
+   - Filtraciones y Lanzamientos Sorpresa (con badge de certeza).
+   - Análisis Arquitectónico y Requerimientos de Hardware (VRAM en local vs datacenter).
+   - Debate Comunitario en la Web y X.
+   - Galería de Evidencia Visual (referenciando images/figura_X_... y explicando qué muestra).
+   - Fuentes consultadas con sus enlaces web reales.
 `;
 
-  const promptUsuario = `
-Realiza la investigación profunda de las últimas 6 horas basándote en el material recopilado y en tu razonamiento de alto nivel:
-
-${dossierTexto}
-
-Redacta el informe completo en formato Markdown técnico de alta densidad.
-`;
-
-  // Intentar con Google Search si está disponible en la clave; de lo contrario, ejecutar con Razonamiento Alto
   let response;
   try {
-    console.log('  🔍 Intentando consulta con Razonamiento Alto y Búsqueda Web...');
     response = await ai.models.generateContent({
       model: 'gemini-3.8-flash',
-      contents: promptUsuario,
+      contents: `Realiza la investigación profunda con razonamiento de alto nivel sobre este material:\n${dossier}`,
       config: {
         systemInstruction,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.HIGH
-        },
-        tools: [{ googleSearch: {} }]
+        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH }
       }
     });
-  } catch (errSearch) {
-    console.warn(`  ℹ️ Búsqueda de Google no disponible o limitada en este tier (${errSearch.message}). Utilizando modo de Razonamiento Alto nativo...`);
-    response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: promptUsuario,
-      config: {
-        systemInstruction,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.HIGH
-        }
-      }
-    });
+  } catch (error) {
+    console.error('Error con Gemini 3.8 Flash:', error);
+    throw error;
   }
 
-  const textoGenerado = response.text || 'No se obtuvo texto de respuesta.';
-  console.log(`✅ Informe técnico generado con éxito (${textoGenerado.length} caracteres).`);
-
-  return textoGenerado;
+  const texto = response.text || 'Sin texto generado.';
+  console.log(`✅ Informe de investigación completado con éxito (${texto.length} caracteres).`);
+  return texto;
 }
 
 // ============================================================================
-// 5. COMPILACIÓN DE ARTEFACTOS (MARKDOWN, HTML RESPONSIVE Y JSON)
+// 7. COMPILACIÓN DE ARTEFACTOS (MARKDOWN, HTML RESPONSIVE Y JSON)
 // ============================================================================
 
-function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
-  console.log('\n📄 [Paso 4/4] Compilando artefactos finales en la carpeta output/...');
+function guardarArtefactos(informeMarkdown, imagenes) {
+  console.log('\n📄 [Paso 4/4] Guardando artefactos en output/...');
 
-  // 1. Guardar informe en Markdown
+  // 1. Markdown
   const rutaMd = path.join(DIRECTORIO_OUTPUT, 'dispatch-report.md');
   fs.writeFileSync(rutaMd, informeMarkdown, 'utf-8');
-  console.log(`  💾 Markdown guardado: ${rutaMd}`);
 
-  // 2. Generar versión HTML moderna adaptada para lectura en teléfonos móviles
-  const galeriaHtml = imagenesDescargadas.map(img => `
+  // 2. HTML responsivo adaptado para teléfonos móviles
+  const galeriaHtml = imagenes.map(img => `
     <div class="card-imagen">
-      <img src="${img.rutaRelativa}" alt="${img.noticiaTitulo}" loading="lazy" />
+      <img src="${img.rutaRelativa}" alt="${img.titulo}" loading="lazy" />
       <div class="caption">
-        <strong>${img.fuente}</strong>: ${img.noticiaTitulo}
+        <strong>${img.fuente}</strong><br>${img.titulo}
       </div>
     </div>
   `).join('');
 
-  const htmlCompleto = `<!DOCTYPE html>
+  const html = `<!DOCTYPE html>
 <html lang="es">
 <head>
   <meta charset="UTF-8">
@@ -360,8 +477,6 @@ function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
       --text-muted: #9ca3af;
       --accent: #38bdf8;
       --accent-glow: rgba(56, 189, 248, 0.15);
-      --success: #10b981;
-      --warning: #f59e0b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -391,16 +506,8 @@ function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
       text-transform: uppercase;
       margin-bottom: 12px;
     }
-    h1 {
-      font-size: 1.75rem;
-      color: #fff;
-      line-height: 1.25;
-      margin-bottom: 10px;
-    }
-    .meta {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-    }
+    h1 { font-size: 1.75rem; color: #fff; line-height: 1.25; margin-bottom: 10px; }
+    .meta { font-size: 0.85rem; color: var(--text-muted); }
     .content {
       background: var(--card-bg);
       border: 1px solid var(--border);
@@ -409,11 +516,8 @@ function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
       font-size: 0.95rem;
       white-space: pre-wrap;
       word-break: break-word;
-      font-family: inherit;
     }
-    .galeria {
-      margin-top: 32px;
-    }
+    .galeria { margin-top: 32px; }
     .galeria h2 {
       font-size: 1.25rem;
       margin-bottom: 16px;
@@ -456,7 +560,7 @@ function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
 </head>
 <body>
   <header>
-    <div class="badge">⚡ Chronos AI Pulse — Ciclo Autónomo 6h</div>
+    <div class="badge">⚡ Chronos AI Pulse — Ciclo 6h Web Abierta</div>
     <h1>Despacho Técnico & Auditoría de Inteligencia Artificial</h1>
     <div class="meta">
       Generado automáticamente el: <strong>${FECHA_AHORA_ISO}</strong> (UTC)<br>
@@ -464,56 +568,50 @@ function compilarArtefactos(informeMarkdown, imagenesDescargadas) {
     </div>
   </header>
 
-  <div class="content">
-${informeMarkdown.replace(/</g, '&lt;').replace(/>/g, '&gt;')}
-  </div>
+  <div class="content">${informeMarkdown.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
 
-  ${imagenesDescargadas.length > 0 ? `
+  ${imagenes.length > 0 ? `
   <div class="galeria">
     <h2>📸 Evidencia Visual, Diagramas y Capturas del Ciclo</h2>
-    <div class="grid-imagenes">
-      ${galeriaHtml}
-    </div>
+    <div class="grid-imagenes">${galeriaHtml}</div>
   </div>
   ` : ''}
 
   <footer>
-    Chronos AI Pulse • Impulsado por Gemini 3.8 Flash con Razonamiento Alto • Ejecutado en GitHub Actions
+    Chronos AI Pulse • Rastreo DuckDuckGo Abierto + Gemini 3.8 Flash (Thinking High) • GitHub Actions
   </footer>
 </body>
 </html>`;
 
   const rutaHtml = path.join(DIRECTORIO_OUTPUT, 'dispatch-report.html');
-  fs.writeFileSync(rutaHtml, htmlCompleto, 'utf-8');
-  console.log(`  🌐 HTML responsivo guardado: ${rutaHtml}`);
+  fs.writeFileSync(rutaHtml, html, 'utf-8');
 
-  // 3. Resumen JSON estructurado
+  // 3. JSON resumido
   const rutaJson = path.join(DIRECTORIO_OUTPUT, 'dispatch-summary.json');
   fs.writeFileSync(rutaJson, JSON.stringify({
     generado_utc: FECHA_AHORA_ISO,
     ventana_inicio_utc: FECHA_INICIO_ISO,
     ventana_fin_utc: FECHA_AHORA_ISO,
-    tema_personalizado: TEMA_PERSONALIZADO || null,
-    total_imagenes: imagenesDescargadas.length,
-    imagenes: imagenesDescargadas,
-    longitud_informe: informeMarkdown.length
+    total_imagenes: imagenes.length,
+    imagenes
   }, null, 2), 'utf-8');
-  console.log(`  📊 Resumen JSON guardado: ${rutaJson}`);
+
+  console.log(`  💾 Artefactos listos: dispatch-report.md, dispatch-report.html, dispatch-summary.json`);
 }
 
 // ============================================================================
-// 6. ENTRADA PRINCIPAL DEL SCRIPT
+// 8. EJECUCIÓN PRINCIPAL
 // ============================================================================
 
 async function main() {
   try {
-    const datosRecopilados = await recolectarDatosEImagenes();
-    const informeGenerado = await ejecutarInvestigacionGemini(datosRecopilados);
-    compilarArtefactos(informeGenerado, datosRecopilados.imagenesDescargadas);
-    console.log('\n🚀 [FINALIZADO] Ciclo de despacho de 6 horas completado exitosamente.');
+    const datos = await ejecutarRastreoWebAbierto();
+    const informe = await razonarYGenerarInforme(datos);
+    guardarArtefactos(informe, datos.imagenesDescargadas);
+    console.log('\n🚀 [FINALIZADO] Despacho de 6 horas completado con éxito.');
     process.exit(0);
   } catch (error) {
-    console.error('\n❌ [ERROR CRÍTICO] El ciclo de despacho falló:', error);
+    console.error('\n❌ [ERROR CRÍTICO]:', error);
     process.exit(1);
   }
 }
