@@ -1,0 +1,68 @@
+name: Chronos AI Pulse — Ciclo de Despacho 6h
+
+# NOTA CRÍTICA:
+# Este workflow NO se ejecuta en 'push' ni en 'pull_request'.
+# Solo se ejecuta:
+# 1. Automáticamente cada 6 horas (00:00, 06:00, 12:00, 18:00 UTC).
+# 2. Manualmente a demanda mediante 'workflow_dispatch' (por ejemplo desde el navegador del móvil).
+
+on:
+  schedule:
+    # Ejecución cada 6 horas exactas (00:00, 06:00, 12:00 y 18:00 UTC)
+    - cron: '0 0,6,12,18 * * *'
+  
+  workflow_dispatch:
+    inputs:
+      custom_topic:
+        description: 'Tema específico, URL o filtración a investigar prioritariamente (opcional)'
+        required: false
+        default: ''
+        type: string
+      depth_level:
+        description: 'Nivel de profundidad de la investigación con Gemini 3.8 Flash'
+        required: true
+        default: 'exhaustive_thinking'
+        type: choice
+        options:
+          - exhaustive_thinking
+          - fast_synthesis
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  investigate-and-generate-dispatch:
+    name: Rastreo 6h, Investigación Profunda & Generación de Informe
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: 📥 Clonar el Repositorio
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Configurar Entorno Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: 📦 Instalar Dependencias del Proyecto
+        run: |
+          npm ci || npm install --no-audit
+
+      - name: 🔍 Ejecutar Rastreo Abierto & Razonamiento Alto con Gemini 3.8 Flash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INPUT_CUSTOM_TOPIC: ${{ inputs.custom_topic }}
+          INPUT_DEPTH_LEVEL: ${{ inputs.depth_level }}
+        run: |
+          node .github/scripts/pulse_collector.mjs
+
+      - name: 📦 Guardar Informe e Imágenes en Artifacts de GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronos-despacho-6h-${{ github.run_id }}
+          path: output/
+          retention-days: 14
+          if-no-files-found: error
