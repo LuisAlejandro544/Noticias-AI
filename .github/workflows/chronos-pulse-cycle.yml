@@ -45,11 +45,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: 📦 Instalar Dependencias del Proyecto
         run: |
-          npm ci || npm install --no-audit
+          npm install --no-audit
 
       - name: 🔍 Ejecutar Rastreo Abierto & Razonamiento Alto con Gemini 3.8 Flash
         env:
